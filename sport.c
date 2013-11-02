@@ -1,4 +1,22 @@
+/* ============================================================
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * ============================================================*/
+
+// Author: Mike Blandford
+
 // ATTINY version of X8R Sport analog input
+// Built in resistors are 15K and 3K3 giving max. voltage of 18.3v (4S)
+
+// Changes:
+// For Attiny13, add pullup on pin 5 (PB0), scale for 3S if pin 5 pulled low
 
 #include <inttypes.h>
 #include <avr/io.h>
@@ -18,6 +36,11 @@
 #define DEBUG_PORT	PORTB
 #define DEBUG_DDR		DDRB
 #define DEBUG_PIN		PINB
+
+#define LINK_BIT		0x01
+#define LINK_PORT		PORTB
+#define LINK_DDR		DDRB
+#define LINK_PIN		PINB
 
 
 // SPORT_BIT is the one with INT0 available
@@ -234,13 +257,30 @@ static void readSensors()
 
   uint16_t val = ADC ; // read the value from the sensor
 
-	val += 1 ;
-	val >>= 2 ;	
+	if ( LINK_PIN & LINK_BIT )
+	{
+		val += 1 ;
+		val >>= 2 ;	
+	}
+	
 	panalog->AnaAve += val ;
 	panalog->AnaCount += 1 ;
+	
 	if ( panalog->AnaCount > 3 )
 	{
-		val = panalog->AnaAve >> 2 ;
+		if ( LINK_PIN & LINK_BIT )
+		{
+			val = panalog->AnaAve >> 2 ;
+		}
+		else
+		{
+			// Scale 15K/3.3K to 10K/3.3K
+			// Map 744 counts to 256
+			// We have 4 samples added so 2976 goes to 256
+			// Use 11/128, is about 0.2% out, but MUCH better than the resistor tolerance
+			val = panalog->AnaAve * 11 ;
+			val >>= 7 ;		// divide by 128
+		}	
 		if ( val > 255 )
 		{
 			val = 255 ;		
@@ -253,7 +293,7 @@ static void readSensors()
 
 void wait4msIdle()
 {
-	// We want 4mS with NO transisitions on INT0
+	// We want 4mS with NO transitions on INT0
 	// and INT0 (PB1) is LOW ( = idle high for inverted data)
 	TCNT0 = 0 ;
 	TCCR0B = 4 ;		// Clock div 256, 26.7 uS per count
@@ -300,6 +340,9 @@ void main()
 	DEBUG_DDR |= DEBUG_BIT ;
 	DEBUG_PORT &= ~DEBUG_BIT ;
 #endif
+
+	LINK_DDR &= ~LINK_BIT ;		// Input
+	LINK_PORT |= LINK_BIT ;		// with pull up
   
 	// Get the first value
 	readSensors() ;
