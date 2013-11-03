@@ -20,10 +20,27 @@
 
 #include <inttypes.h>
 #include <avr/io.h>
+#include <avr/wdt.h>
 //#include <avr/interrupt.h>
 
 // ATTINY44, INT0 is on PB2, ADC1 is on PA1
 // ATTINY85, INT0 is on PB2, ADC3 is on PB3
+
+// ATTINY13 Fuse Settings:
+//HIGH 0xFD
+//LOW 0x1A
+
+//No self program
+//No DWEN
+//Brownout at 1.8V
+//No Reset disable
+//SPIEN on
+//EESAVE on
+//Watchdog enabled
+//No CLKDIV8
+//int RC @ 9.6MHz, 14CK and 64mS
+
+
 
 #define SENSOR_ID		0x1B
 #define A2_ID       0xF103
@@ -318,6 +335,7 @@ void wait4msIdle()
 #endif
 			TCNT0 = 0 ;			
 		}
+		wdt_reset() ;
 	} while ( TCNT0 < 151 ) ;
 	TCCR0B = 0 ;		// Stop timer
 }
@@ -326,6 +344,13 @@ void main()
 {
   static uint8_t lastRx = 0 ;
 	uint8_t rx ;
+
+	wdt_reset() ;
+	/* Start timed sequence */
+	WDTCR |= (1<<WDCE) | (1<<WDE) ;
+	/* Set new prescaler(time-out) value = 16K cycles (~0.125 s) */
+	WDTCR = (1<<WDE) | (1<<WDP1) | (1<<WDP0) ;
+	wdt_reset() ;
 
   initSerial() ;
 	DIDR0 = 4 ;
@@ -344,11 +369,14 @@ void main()
 	LINK_DDR &= ~LINK_BIT ;		// Input
 	LINK_PORT |= LINK_BIT ;		// with pull up
   
+	wdt_reset() ;
 	// Get the first value
 	readSensors() ;
   readSensors() ;
   readSensors() ;
   readSensors() ;
+
+	wdt_reset() ;
 
 	wait4msIdle() ;
 	// Had 4mS idle, now we expect a 0x7E
@@ -376,6 +404,7 @@ void main()
 #endif
 			break ;
 		}
+		wdt_reset() ;
 	}
 	
 #if PINCHANGE==0
@@ -397,17 +426,24 @@ void main()
 #endif
 			break ;
 		}
+		wdt_reset() ;
 	}
 
 	if ( rx < OSCCALHIGH )
 	{
 		if ( rx > OSCCALLOW )
 		{
-			int8_t value ;
-			value = rx - OSCCALCENTRE ;
+			int16_t value ;
+			value = rx - OSCCALCENTRE ;		// +/- 5
+
+			// check here for OSCCAL not wrapping
 			if ( value )
 			{
-				OSCCAL += value ;
+				value += OSCCAL ;
+				if ( ( value >= 0 ) && ( value < 128 ) )
+				{
+					OSCCAL = value ;
+				}
 			}
 		}
 	}
@@ -461,6 +497,7 @@ void main()
 #else
 			GIFR = (1 << INTF0) ;
 #endif
+			wdt_reset() ;
 		}
   }
 }	
