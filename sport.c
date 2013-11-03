@@ -440,10 +440,15 @@ void main()
 			if ( value )
 			{
 				value += OSCCAL ;
-				if ( ( value >= 0 ) && ( value < 128 ) )
+				if ( value < 0 )
 				{
-					OSCCAL = value ;
+					value = 0 ;					
 				}
+				if ( value > 127 )
+				{
+					value = 127 ;					
+				}
+				OSCCAL = value ;
 			}
 		}
 	}
