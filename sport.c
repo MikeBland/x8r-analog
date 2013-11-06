@@ -17,6 +17,7 @@
 
 // Changes:
 // For Attiny13, add pullup on pin 5 (PB0), scale for 3S if pin 5 pulled low
+// Change timing method, use TIMER0 for hardware timing
 
 #include <inttypes.h>
 #include <avr/io.h>
@@ -59,37 +60,42 @@
 #define LINK_DDR		DDRB
 #define LINK_PIN		PINB
 
+//#define CLK_BIT			0x08
+//#define CLK_PORT		PORTB
+//#define CLK_DDR			DDRB
+//#define CLK_PIN			PINB
 
 // SPORT_BIT is the one with INT0 available
+// Unless PINCHANGE is defined
 #define SPORT_BIT		0x02
 #define SPORT_PORT	PORTB
 #define SPORT_DDR		DDRB
 #define SPORT_PIN		PINB
 
 // These for 9.6MHz
-#if F_CPU == 9600000
-#define RXCENTRE		23
-#define RXINTRA			52
-#define RXSTOP			52
-#define TXDELAY			50
-#define XMIT_START_ADJUSTMENT 3
-#define OSCCALHIGH	35
-#define OSCCALLOW		24
-#define OSCCALCENTRE	29
-#define IDLEDELAYTIME	250
-#else
-	#if F_CPU == 8000000
-	#define RXCENTRE		19
-	#define RXINTRA			43
-	#define RXSTOP			43
-	#define TXDELAY			41
-	#define XMIT_START_ADJUSTMENT 3
-	#define OSCCALHIGH	29
-	#define OSCCALLOW		20
-	#define OSCCALCENTRE	24
-	#define IDLEDELAYTIME	208
-	#endif
-#endif
+//#if F_CPU == 9600000
+//#define RXCENTRE		23
+//#define RXINTRA			48 //51
+//#define RXSTOP			48 //51
+//#define TXDELAY			50
+//#define XMIT_START_ADJUSTMENT 3
+//#define OSCCALHIGH	149
+//#define OSCCALLOW		101
+//#define OSCCALCENTRE	125
+//#define IDLEDELAYTIME	250
+//#else
+//	#if F_CPU == 8000000		// Untested
+//	#define RXCENTRE		19
+//	#define RXINTRA			43
+//	#define RXSTOP			43
+//	#define TXDELAY			41
+//	#define XMIT_START_ADJUSTMENT 3
+//	#define OSCCALHIGH	42
+//	#define OSCCALLOW		29
+//	#define OSCCALCENTRE	35
+//	#define IDLEDELAYTIME	208
+//	#endif
+//#endif
 
 #define FORCE_INDIRECT(ptr) __asm__ __volatile__ ("" : "=e" (ptr) : "0" (ptr))
 
@@ -100,9 +106,13 @@ struct t_anacontrol
 	uint8_t AnaCount ;
 } AnalogControl ;
 
+uint8_t BitRate ;
+uint8_t RxCentre ;
+//uint8_t Osccal2 ;
 
 uint8_t Crc ;
 
+void waitCompA( void ) ;
 static uint8_t recv( void ) ;
 static uint8_t rx_pin_read( void ) ;
 inline void setTX( void ) ;
@@ -114,22 +124,33 @@ static void sendData( void ) ;
 static void sendValue( uint8_t value ) ;
 static void readSensors( void ) ;
 void wait4msIdle( void ) ;
+//void clockOut( void ) ;
 void main( void ) ;
 
 
 static uint8_t rx_pin_read()
 {
-	return PINB & SPORT_BIT ;
+	return SPORT_PIN & SPORT_BIT ;
 }
 
 
-void tunedDelay( uint8_t delay)
-{ 
-	do
+//void tunedDelay( uint8_t delay)
+//{ 
+//	do
+//	{
+//		asm("") ;
+//	} while ( --delay ) ;
+//}
+
+void waitCompA()
+{
+	while ( ( TIFR0 & (1 << OCF0A) ) == 0 )
 	{
-		asm("") ;
-	} while ( --delay ) ;
+		// null body
+	}
+	TIFR0 = (1 << OCF0A) ; 		// Clear flag
 }
+
 
 //
 // The receive routine called by the interrupt handler
@@ -142,10 +163,13 @@ static uint8_t recv()
 #if DEBUG
 	DEBUG_PORT |= DEBUG_BIT ;
 #endif
+#if PINCHANGE==0
   if (rx_pin_read())
   {
+#endif
+		
     // Wait approximately 1/2 of a bit width to "centre" the sample
-    tunedDelay(RXCENTRE) ;
+		waitCompA() ;
 #if DEBUG
 	DEBUG_PORT &= ~DEBUG_BIT ;
 	DEBUG_PORT |= DEBUG_BIT ;
@@ -153,21 +177,26 @@ static uint8_t recv()
     // Read each of the 8 bits
     for ( uint8_t i = 0 ; i < 8 ; i += 1 )
     {
-      tunedDelay(RXINTRA);
+      d >>= 1 ;
+			OCR0A += BitRate ;
+			waitCompA() ;
 #if DEBUG
 	DEBUG_PORT &= ~DEBUG_BIT ;
+#endif
+      if (!rx_pin_read())
+			{
+        d |= 0x80 ;
+			}
+#if DEBUG
 	DEBUG_PORT |= DEBUG_BIT ;
 #endif
-      d >>= 1 ;
-      if (rx_pin_read())
-        d &= ~0x80 ;
-      else // else clause added to ensure function timing is ~balanced
-        d |= 0x80 ;
     }
-
     // skip the stop bit
-    tunedDelay(RXSTOP);
+		OCR0A += BitRate ;
+		waitCompA() ;
+#if PINCHANGE==0
   }
+#endif
 #if DEBUG
 	DEBUG_PORT &= ~DEBUG_BIT ;
 #endif
@@ -189,9 +218,10 @@ inline void setRX()
 int swrite(uint8_t b)
 {
 	// Write the start bit
+	OCR0A = TCNT0 + BitRate ;
+	TIFR0 = (1 << OCF0A) ; 		// Clear flag
 	SPORT_PORT |= SPORT_BIT ;		// high for start bit as inverse logic
-  tunedDelay(TXDELAY + XMIT_START_ADJUSTMENT);
-
+	waitCompA() ;
   // Write each of the 8 bits
     for ( uint8_t i = 8 ; i ; i -= 1 )
     {
@@ -199,15 +229,16 @@ int swrite(uint8_t b)
 				SPORT_PORT &= ~SPORT_BIT ;		// send 1
       else
 				SPORT_PORT |= SPORT_BIT ;			// send 0
-    
-      tunedDelay(TXDELAY);
+			OCR0A += BitRate ;
+			waitCompA() ;
 			b >>= 1 ;
     }
 		SPORT_PORT &= ~SPORT_BIT ;		// restore pin to natural state
 
-  tunedDelay(TXDELAY) ;
+	OCR0A += BitRate ;
+	waitCompA() ;
   
-  return 1;
+  return 1 ;
 }
 
 static void initSerial()
@@ -256,6 +287,7 @@ static void sendValue( uint8_t value )
 
 static void sendData()
 {
+	TCCR0B = 1 ;		// Clock div 1
   sendValue( AnalogControl.Analog ) ;
 }
 
@@ -295,7 +327,12 @@ static void readSensors()
 			// Map 744 counts to 256
 			// We have 4 samples added so 2976 goes to 256
 			// Use 11/128, is about 0.2% out, but MUCH better than the resistor tolerance
-			val = panalog->AnaAve * 11 ;
+//			val = panalog->AnaAve * 11 ;
+			// Shifts and adds are faster and shorter than a multiply
+			val = panalog->AnaAve << 2 ;	// *4
+			val += panalog->AnaAve ;			// *5
+			val <<= 1 ;										// *10
+			val += panalog->AnaAve ;			// *11
 			val >>= 7 ;		// divide by 128
 		}	
 		if ( val > 255 )
@@ -340,6 +377,30 @@ void wait4msIdle()
 	TCCR0B = 0 ;		// Stop timer
 }
 
+//void clockOut()
+//{
+//	// CLOCK DEBUG
+//	if ( ( CLK_PIN & CLK_BIT) == 0 )		// Pin pulled low
+//	{
+//		uint16_t i ;
+//		CLK_DDR |= CLK_BIT ;		// Output
+//		TCCR0B = 2 ;		// Clock div 8, 1.2 uS per count
+//		for( i = 0 ; i < 16384 ; )
+//		{
+//			if ( TIFR0 & (1 << TOV0) )
+//			{
+//				TIFR0 = (1 << TOV0) ; 		// Clear flag
+//				CLK_PORT ^= CLK_BIT ;				
+//				i += 1 ;
+//			}
+//			wdt_reset() ;
+//		}	
+//		CLK_DDR &= ~CLK_BIT ;		// Input
+//		CLK_PORT |= CLK_BIT ;		// with pull up
+//	}
+//}
+
+
 void main()
 {
   static uint8_t lastRx = 0 ;
@@ -368,6 +429,9 @@ void main()
 
 	LINK_DDR &= ~LINK_BIT ;		// Input
 	LINK_PORT |= LINK_BIT ;		// with pull up
+
+//	CLK_DDR &= ~CLK_BIT ;		// Input
+//	CLK_PORT |= CLK_BIT ;		// with pull up
   
 	wdt_reset() ;
 	// Get the first value
@@ -378,11 +442,13 @@ void main()
 
 	wdt_reset() ;
 
+//	clockOut() ;
+
 	wait4msIdle() ;
 	// Had 4mS idle, now we expect a 0x7E
-	// So we can time a start bit and the first logic 0 bit (2 bits)
+	// So we can time the 6 one bits in the middle
 
-	TCCR0B = 2 ;		// Clock div 8, 1.2 uS per count
+	TCCR0B = 2 ;		// Clock div 8, 0.833 uS per count
 #if PINCHANGE
 	GIFR = (1 << PCIF) ;	// CLEAR flag
 #else
@@ -396,7 +462,7 @@ void main()
 		if ( GIFR & (1 << INTF0) )
 #endif
 		{
-			rx = TCNT0 ;
+			rx = TCNT0 ;		// Note timer value
 #if PINCHANGE
 			GIFR = (1 << PCIF) ;		// CLEAR flag
 #else
@@ -406,7 +472,26 @@ void main()
 		}
 		wdt_reset() ;
 	}
-	
+	// Got the start of the start bit
+
+	for(;;)
+	{
+#if PINCHANGE
+		if ( GIFR & (1 << PCIF) )
+#else
+		if ( GIFR & (1 << INTF0) )
+#endif
+		{
+#if PINCHANGE
+			GIFR = (1 << PCIF) ;		// CLEAR flag
+#else
+			GIFR = (1 << INTF0) ;
+#endif
+			break ;
+		}
+		wdt_reset() ;
+	}
+
 #if PINCHANGE==0
 	MCUCR &= ~1 ;		// INT0 interrupt on falling edge
 #endif
@@ -418,7 +503,7 @@ void main()
 		if ( GIFR & (1 << INTF0) )
 #endif
 		{
-			rx = TCNT0 = rx ;
+			rx = TCNT0 - rx ;
 #if PINCHANGE
 			GIFR = (1 << PCIF) ;		// CLEAR flag
 #else
@@ -428,30 +513,35 @@ void main()
 		}
 		wdt_reset() ;
 	}
+	// rx now the time (in 0.8333uS units) of the 8 bits
 
-	if ( rx < OSCCALHIGH )
-	{
-		if ( rx > OSCCALLOW )
-		{
-			int16_t value ;
-			value = rx - OSCCALCENTRE ;		// +/- 5
+	BitRate = rx ;
+	RxCentre = rx/2 - 24 ;
+//	Osccal1 = OSCCAL ;
+//	if ( rx < OSCCALHIGH )
+//	{
+//		if ( rx > OSCCALLOW )
+//		{
+//			int16_t value ;
+//			value = OSCCALCENTRE - rx ;		// +/- 5
 
-			// check here for OSCCAL not wrapping
-			if ( value )
-			{
-				value += OSCCAL ;
-				if ( value < 0 )
-				{
-					value = 0 ;					
-				}
-				if ( value > 127 )
-				{
-					value = 127 ;					
-				}
-				OSCCAL = value ;
-			}
-		}
-	}
+//			// check here for OSCCAL not wrapping
+//			if ( value )
+//			{
+//				value += OSCCAL ;
+//				if ( value < 0 )
+//				{
+//					value = 0 ;					
+//				}
+//				if ( value > 127 )
+//				{
+//					value = 127 ;					
+//				}
+//				OSCCAL = value ;
+//			}
+//		}
+//	}
+//	Osccal2 = OSCCAL ;
 
 #if PINCHANGE==0
 	MCUCR |= 3 ;		// INT0 interrupt on rising edge
@@ -473,6 +563,11 @@ void main()
 		if ( GIFR & (1 << INTF0) )
 #endif
 		{
+			TCCR0B = 0 ;		// stop timer
+			TCNT0 = 0 ;
+			TCCR0B = 1 ;		// Clock div 1
+			OCR0A = RxCentre ;
+			TIFR0 = (1 << OCF0A) ; 		// Clear flag
 #if PINCHANGE
 			GIFR = (1 << PCIF) ;		// CLEAR flag
 			if ( SPORT_PIN & SPORT_BIT)
@@ -485,10 +580,11 @@ void main()
 				{
     		  lastRx = 0 ;
 					// Delay around 400uS
-					for ( uint8_t i = 5 ; i ; i -= 1 )
-					{
-    				tunedDelay( IDLEDELAYTIME ) ;
-					}
+					TCCR0B = 0 ;		// stop timer
+					TIFR0 = (1 << OCF0A) ; 		// Clear flag
+					OCR0A = TCNT0 + 60 ;
+					TCCR0B = 3 ;		// Clock div 64
+					waitCompA() ;
   		  	sendData() ;
   		  	readSensors() ;
 				}
@@ -502,8 +598,10 @@ void main()
 #else
 			GIFR = (1 << INTF0) ;
 #endif
-			wdt_reset() ;
 		}
+		wdt_reset() ;
+//		clockOut() ;
+
   }
 }	
 
