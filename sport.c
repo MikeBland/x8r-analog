@@ -18,10 +18,12 @@
 // Changes:
 // For Attiny13, add pullup on pin 5 (PB0), scale for 3S if pin 5 pulled low
 // Change timing method, use TIMER0 for hardware timing
+// Add EEPROM storage of hardware ID
 
 #include <inttypes.h>
 #include <avr/io.h>
 #include <avr/wdt.h>
+#include <avr/pgmspace.h>
 //#include <avr/interrupt.h>
 
 // ATTINY44, INT0 is on PB2, ADC1 is on PA1
@@ -99,6 +101,15 @@
 
 #define FORCE_INDIRECT(ptr) __asm__ __volatile__ ("" : "=e" (ptr) : "0" (ptr))
 
+typedef uint8_t   prog_uint8_t  __attribute__((__progmem__));//,deprecated("prog_uint8_t type is deprecated.")));
+#define APM __attribute__(( section(".progmem.data") ))
+
+const prog_uint8_t APM Indices[] = {	0x00, 0xA1, 0x22, 0x83, 0xE4, 0x45,
+																			0xC6, 0x67, 0x48, 0xE9, 0x6A, 0xCB,
+                                      0xAC, 0x0D, 0x8E, 0x2F, 0xD0, 0x71,
+                                      0xF2, 0x53, 0x34, 0x95, 0x16, 0xB7,
+																			0x98, 0x39, 0xBA, 0x1B } ;
+
 struct t_anacontrol
 {
 	uint8_t Analog ;
@@ -108,7 +119,8 @@ struct t_anacontrol
 
 uint8_t BitRate ;
 uint8_t RxCentre ;
-//uint8_t Osccal2 ;
+
+uint8_t SensorId ;
 
 uint8_t Crc ;
 
@@ -126,6 +138,9 @@ static void readSensors( void ) ;
 void wait4msIdle( void ) ;
 //void clockOut( void ) ;
 void main( void ) ;
+static void init_from_eeprom( void ) ;
+static void chk_wrieeprom( uint8_t uiAddress, uint8_t ucData ) ;
+static uint8_t eeprom_read( uint8_t address ) ;
 
 
 static uint8_t rx_pin_read()
@@ -442,6 +457,8 @@ void main()
 
 	wdt_reset() ;
 
+	init_from_eeprom() ;
+
 //	clockOut() ;
 
 	wait4msIdle() ;
@@ -576,7 +593,7 @@ void main()
 			GIFR = (1 << INTF0) ;
 #endif
 				rx = recv() ;
-		    if (lastRx == 0x7e && rx == SENSOR_ID)
+		    if (lastRx == 0x7e && rx == SensorId)
 				{
     		  lastRx = 0 ;
 					// Delay around 400uS
@@ -604,4 +621,76 @@ void main()
 
   }
 }	
+
+
+static void init_from_eeprom()
+{
+	uint8_t value ;
+	uint8_t newValue ;
+	uint8_t i ;
+
+//	SensorId = SENSOR_ID ;		// Set default
+
+	value = eeprom_read( 0 ) ;
+	if ( value == 0xFF )
+	{
+		newValue = SENSOR_ID ;		// Set default
+	}
+	else
+	{
+		for ( i = 0 ; i < sizeof(Indices) ; i += 1 )
+		{
+  		newValue = pgm_read_byte( &Indices[i] ) ;
+			if ( ( value & 0x1F ) == ( newValue & 0x1F ) )
+			{
+				break ;
+			}
+		}
+		if ( i >= sizeof(Indices) )
+		{
+			// Not found
+			newValue = SENSOR_ID ;		// Set default
+		}
+	}
+	
+	if ( newValue != value )
+	{
+		chk_wrieeprom( 0, newValue ) ;
+	}
+	SensorId = newValue ;
+}
+
+// Write an 8 bit byte to EEPROM, Address->byte
+static void chk_wrieeprom( uint8_t uiAddress, uint8_t ucData )
+{
+/* Wait for completion of previous write */
+	while(EECR & (1<<EEPE))
+	{
+		// null body
+	}
+/* Set up address and data registers */
+	EEAR = uiAddress;
+	EEDR = ucData;
+/* Write logical one to EEMWE */
+	EECR |= (1<<EEMPE);
+/* Start eeprom write by setting EEWE */
+	EECR |= (1<<EEPE);
+}
+
+
+// Read an 8 bit byte from EEPROM, Address->byte
+static uint8_t eeprom_read( uint8_t address )
+{
+/* Wait for completion of previous write */
+	while(EECR & (1<<EEPE))
+	{
+		// null body
+	}
+/* Set up address register */
+	EEAR = address ;
+/* Start eeprom read by writing EERE */
+	EECR |= (1<<EERE) ;
+/* Return data from data register */
+	return EEDR ;
+}
 
