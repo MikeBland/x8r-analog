@@ -364,7 +364,7 @@ static void readSensors()
 
   	x = val = ADC ; // read the value from the sensor
 
-		if ( LINK_PIN & LINK_BIT )
+		if ( ( LINK_PIN & LINK_BIT ) || ( index == 1 ) )
 		{
 			val += 1 ;
 			val >>= 2 ;	
@@ -375,7 +375,7 @@ static void readSensors()
 	
 		if ( panalog->AnaCount > 3 )
 		{
-			if ( LINK_PIN & LINK_BIT )
+			if ( ( LINK_PIN & LINK_BIT ) || ( index == 1 ) )
 			{
 				val = panalog->AnaAve >> 2 ;
 			}
@@ -401,7 +401,7 @@ static void readSensors()
   	ADMUX = _BV(MUX1) | _BV(MUX0) ;
 
 	} while ( ++index < 2 ) ;
-	// val has full 10 bit input of second ADC
+	// x has full 10 bit input of second ADC
 	if ( x < 1000 )
 	{
 		// We have a real analog input on the second channel
