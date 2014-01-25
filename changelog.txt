@@ -1,0 +1,16 @@
+====================================================================================
+x8r-analog changelog
+
+Format is as follows:
+******************************************
+CHANGELOG: 25-Jan-2014
+description here
+====================================================================================
+
+******************************************
+CHANGELOG: 25-Jan-2014  MPB (r8)
+
+Skip first 2 frames at start, fixes X6R problem
+Add second analog input
+Add link option to choose second analog ID
+Debug turned off

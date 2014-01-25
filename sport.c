@@ -19,6 +19,10 @@
 // For Attiny13, add pullup on pin 5 (PB0), scale for 3S if pin 5 pulled low
 // Change timing method, use TIMER0 for hardware timing
 // Add EEPROM storage of hardware ID
+//
+// Skip first 2 frames at start, fixes X6R problem
+// Add second analog input
+// Add link option to choose second analog ID
 
 #include <inttypes.h>
 #include <avr/io.h>
@@ -46,11 +50,15 @@
 
 
 #define SENSOR_ID		0x1B
+#define A1_ID       0xF102
 #define A2_ID       0xF103
+
+#define FR_TEMP2			5
+
 
 #define PINCHANGE		1
 
-#define DEBUG		1
+#define DEBUG		0
 
 #define DEBUG_BIT		0x10
 #define DEBUG_PORT	PORTB
@@ -61,6 +69,11 @@
 #define LINK_PORT		PORTB
 #define LINK_DDR		DDRB
 #define LINK_PIN		PINB
+
+#define ID_BIT		0x10
+#define ID_PORT		PORTB
+#define ID_DDR		DDRB
+#define ID_PIN		PINB
 
 //#define CLK_BIT			0x08
 //#define CLK_PORT		PORTB
@@ -115,7 +128,7 @@ struct t_anacontrol
 	uint8_t Analog ;
 	uint16_t AnaAve ;
 	uint8_t AnaCount ;
-} AnalogControl ;
+} AnalogControl[2]  ;
 
 uint8_t BitRate ;
 uint8_t RxCentre ;
@@ -130,10 +143,10 @@ static uint8_t rx_pin_read( void ) ;
 inline void setTX( void ) ;
 inline void setRX( void ) ;
 static void initSerial( void ) ;
-int swrite(uint8_t b) ;
+void swrite(uint8_t b) ;
 static void sendCrc( void ) ;
 static void sendData( void ) ;
-static void sendValue( uint8_t value ) ;
+static void sendValue( uint8_t value, uint16_t id ) ;
 static void readSensors( void ) ;
 void wait4msIdle( void ) ;
 //void clockOut( void ) ;
@@ -141,6 +154,7 @@ void main( void ) ;
 static void init_from_eeprom( void ) ;
 static void chk_wrieeprom( uint8_t uiAddress, uint8_t ucData ) ;
 static uint8_t eeprom_read( uint8_t address ) ;
+uint8_t getBaudrate( void ) ;
 
 
 static uint8_t rx_pin_read()
@@ -230,10 +244,11 @@ inline void setRX()
 	SPORT_PORT &= ~SPORT_BIT ;		// low so no pullup
 }
 
-int swrite(uint8_t b)
+void swrite(uint8_t b)
 {
+	uint8_t lBitRate = BitRate ;
 	// Write the start bit
-	OCR0A = TCNT0 + BitRate ;
+	OCR0A = TCNT0 + lBitRate ;
 	TIFR0 = (1 << OCF0A) ; 		// Clear flag
 	SPORT_PORT |= SPORT_BIT ;		// high for start bit as inverse logic
 	waitCompA() ;
@@ -244,16 +259,14 @@ int swrite(uint8_t b)
 				SPORT_PORT &= ~SPORT_BIT ;		// send 1
       else
 				SPORT_PORT |= SPORT_BIT ;			// send 0
-			OCR0A += BitRate ;
+			OCR0A += lBitRate ;
 			waitCompA() ;
 			b >>= 1 ;
     }
 		SPORT_PORT &= ~SPORT_BIT ;		// restore pin to natural state
 
-	OCR0A += BitRate ;
+	OCR0A += lBitRate ;
 	waitCompA() ;
-  
-  return 1 ;
 }
 
 static void initSerial()
@@ -284,13 +297,13 @@ static void sendCrc()
   sendByte(0xFF-Crc) ;
 }
 
-static void sendValue( uint8_t value )
+static void sendValue( uint8_t value, uint16_t id )
 {
 	setTX() ;
   Crc = 0;
   sendByte(0x10); // DATA_FRAME
-  sendByte( (uint8_t)A2_ID );
-  sendByte( A2_ID >> 8 );
+  sendByte( (uint8_t)id );
+  sendByte( id >> 8 );
   sendByte(value);
   sendByte(0);
   sendByte(0);
@@ -299,64 +312,101 @@ static void sendValue( uint8_t value )
 	setRX() ;
 }
 
+static uint8_t whichId = 0 ;
 
 static void sendData()
 {
+	uint8_t value ;
+	uint16_t id ;
 	TCCR0B = 1 ;		// Clock div 1
-  sendValue( AnalogControl.Analog ) ;
+	if ( whichId == 0 )
+	{
+		whichId = 1 ;
+  	value = AnalogControl[0].Analog ;
+		id = A2_ID ;
+	}
+	else
+	{
+		whichId = 0 ;
+  	value = AnalogControl[1].Analog ;
+		id = FR_TEMP2 ;
+#if DEBUG == 0
+		if ( (ID_PIN & ID_BIT) == 0 )
+		{
+			id = A1_ID ;
+		}
+#endif	
+	}
+  sendValue( value, id ) ;
+	if ( (DIDR0 & 8) == 0 )
+	{
+		whichId = 0 ;
+	}
 }
 
 static void readSensors()
 {
 	struct t_anacontrol *panalog ;
+	uint8_t index = 0 ;
+	uint16_t val ;
+	uint16_t x ;
 
-	panalog = &AnalogControl ;
+	panalog = &AnalogControl[0] ;
 	FORCE_INDIRECT( panalog ) ;
 
   // set the reference to Vcc and the measurement to ADC1
   ADMUX = _BV(MUX0) ;
 
-	ADCSRA |= _BV(ADSC); // Start conversion
-  while (bit_is_set(ADCSRA,ADSC)); // measuring
-
-  uint16_t val = ADC ; // read the value from the sensor
-
-	if ( LINK_PIN & LINK_BIT )
+	do
 	{
-		val += 1 ;
-		val >>= 2 ;	
-	}
-	
-	panalog->AnaAve += val ;
-	panalog->AnaCount += 1 ;
-	
-	if ( panalog->AnaCount > 3 )
-	{
+		ADCSRA |= _BV(ADSC); // Start conversion
+  	while (bit_is_set(ADCSRA,ADSC)); // measuring
+
+  	x = val = ADC ; // read the value from the sensor
+
 		if ( LINK_PIN & LINK_BIT )
 		{
-			val = panalog->AnaAve >> 2 ;
+			val += 1 ;
+			val >>= 2 ;	
 		}
-		else
+	
+		panalog->AnaAve += val ;
+		panalog->AnaCount += 1 ;
+	
+		if ( panalog->AnaCount > 3 )
 		{
-			// Scale 15K/3.3K to 10K/3.3K
-			// Map 744 counts to 256
-			// We have 4 samples added so 2976 goes to 256
-			// Use 11/128, is about 0.2% out, but MUCH better than the resistor tolerance
-//			val = panalog->AnaAve * 11 ;
-			// Shifts and adds are faster and shorter than a multiply
-			val = panalog->AnaAve << 2 ;	// *4
-			val += panalog->AnaAve ;			// *5
-			val <<= 1 ;										// *10
-			val += panalog->AnaAve ;			// *11
-			val >>= 7 ;		// divide by 128
-		}	
-		if ( val > 255 )
-		{
-			val = 255 ;		
+			if ( LINK_PIN & LINK_BIT )
+			{
+				val = panalog->AnaAve >> 2 ;
+			}
+			else
+			{
+				// Scale 15K/3.3K to 10K/3.3K
+				// Map 744 counts to 256
+				// We have 4 samples added so 2976 goes to 256
+				// Use 11/128, is about 0.2% out, but MUCH better than the resistor tolerance
+	//			val = panalog->AnaAve * 11 ;
+				// Shifts and adds are faster and shorter than a multiply
+				val = panalog->AnaAve << 2 ;	// *4
+				val += panalog->AnaAve ;			// *5
+				val <<= 1 ;										// *10
+				val += panalog->AnaAve ;			// *11
+				val >>= 7 ;		// divide by 128
+			}	
+			panalog->Analog = (val > 255) ? 255 : val ;
+			panalog->AnaCount = 0 ;
+			panalog->AnaAve = 0 ;
 		}
-		panalog->Analog = val ;
-		panalog->AnaCount = 0 ;
-		panalog->AnaAve = 0 ;
+		panalog += 1 ;
+  	ADMUX = _BV(MUX1) | _BV(MUX0) ;
+
+	} while ( ++index < 2 ) ;
+	// val has full 10 bit input of second ADC
+	if ( x < 1000 )
+	{
+		// We have a real analog input on the second channel
+		DIDR0 |= 8 ;	// Disable digital pin
+		PORTB &= ~8 ;		// Remove pull up on second analog i/p
 	}
 }
 
@@ -415,56 +465,9 @@ void wait4msIdle()
 //	}
 //}
 
-
-void main()
+uint8_t getBaudrate()
 {
-  static uint8_t lastRx = 0 ;
 	uint8_t rx ;
-
-	wdt_reset() ;
-	/* Start timed sequence */
-	WDTCR |= (1<<WDCE) | (1<<WDE) ;
-	/* Set new prescaler(time-out) value = 16K cycles (~0.125 s) */
-	WDTCR = (1<<WDE) | (1<<WDP1) | (1<<WDP0) ;
-	wdt_reset() ;
-
-  initSerial() ;
-	DIDR0 = 4 ;
-	ADCSRA = 0x86 ;
-#if PINCHANGE
-	PCMSK |= SPORT_BIT ;
-#else
-	MCUCR |= 3 ;		// INT0 interrupt on rising edge
-#endif
-
-#if DEBUG
-	DEBUG_DDR |= DEBUG_BIT ;
-	DEBUG_PORT &= ~DEBUG_BIT ;
-#endif
-
-	LINK_DDR &= ~LINK_BIT ;		// Input
-	LINK_PORT |= LINK_BIT ;		// with pull up
-
-//	CLK_DDR &= ~CLK_BIT ;		// Input
-//	CLK_PORT |= CLK_BIT ;		// with pull up
-  
-	wdt_reset() ;
-	// Get the first value
-	readSensors() ;
-  readSensors() ;
-  readSensors() ;
-  readSensors() ;
-
-	wdt_reset() ;
-
-	init_from_eeprom() ;
-
-//	clockOut() ;
-
-	wait4msIdle() ;
-	// Had 4mS idle, now we expect a 0x7E
-	// So we can time the 6 one bits in the middle
-
 	TCCR0B = 2 ;		// Clock div 8, 0.833 uS per count
 #if PINCHANGE
 	GIFR = (1 << PCIF) ;	// CLEAR flag
@@ -531,6 +534,66 @@ void main()
 		wdt_reset() ;
 	}
 	// rx now the time (in 0.8333uS units) of the 8 bits
+	return rx ;
+}
+
+void main()
+{
+  static uint8_t lastRx = 0 ;
+	uint8_t rx ;
+
+	wdt_reset() ;
+	/* Start timed sequence */
+	WDTCR |= (1<<WDCE) | (1<<WDE) ;
+	/* Set new prescaler(time-out) value = 16K cycles (~0.125 s) */
+	WDTCR = (1<<WDE) | (1<<WDP1) | (1<<WDP0) ;
+	wdt_reset() ;
+
+  initSerial() ;
+	DIDR0 = 4 ;
+	ADCSRA = 0x86 ;
+#if PINCHANGE
+	PCMSK |= SPORT_BIT ;
+#else
+	MCUCR |= 3 ;		// INT0 interrupt on rising edge
+#endif
+
+	PORTB |= 8 ;		// Pull up on second analog i/p
+#if DEBUG
+	DEBUG_DDR |= DEBUG_BIT ;
+	DEBUG_PORT &= ~DEBUG_BIT ;
+#else
+	ID_DDR &= ~ID_BIT ;		// Input
+	ID_PORT |= ID_BIT ;		// pullup
+#endif
+
+	LINK_DDR &= ~LINK_BIT ;		// Input
+	LINK_PORT |= LINK_BIT ;		// with pull up
+
+//	CLK_DDR &= ~CLK_BIT ;		// Input
+//	CLK_PORT |= CLK_BIT ;		// with pull up
+  
+	wdt_reset() ;
+	// Get the first value
+	readSensors() ;
+  readSensors() ;
+  readSensors() ;
+  readSensors() ;
+
+	wdt_reset() ;
+
+	init_from_eeprom() ;
+
+//	clockOut() ;
+
+	wait4msIdle() ;
+	// Had 4mS idle, now we expect a 0x7E
+	// So we can time the 6 one bits in the middle
+	getBaudrate() ;		// Skip first frame (X6R problem)
+	wait4msIdle() ;
+	getBaudrate() ;		// Skip second frame as well
+	wait4msIdle() ;
+	rx = getBaudrate() ;
 
 	BitRate = rx ;
 	RxCentre = rx/2 - 24 ;
