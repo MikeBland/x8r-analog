@@ -16,6 +16,9 @@
 // Built in resistors are 15K and 3K3 giving max. voltage of 18.3v (4S)
 
 // Changes:
+// 06-Sep-2018
+// Reduce SPort data rate to 1/2 frames every 200mS
+
 // For Attiny13, add pullup on pin 5 (PB0), scale for 3S if pin 5 pulled low
 // Change timing method, use TIMER0 for hardware timing
 // Add EEPROM storage of hardware ID
@@ -136,6 +139,8 @@ uint8_t RxCentre ;
 uint8_t SensorId ;
 
 uint8_t Crc ;
+uint8_t Timer12ms ;
+uint8_t SendStart ;
 
 void waitCompA( void ) ;
 static uint8_t recv( void ) ;
@@ -146,7 +151,7 @@ static void initSerial( void ) ;
 void swrite(uint8_t b) ;
 static void sendCrc( void ) ;
 static void sendData( void ) ;
-static void sendValue( uint8_t value, uint16_t id ) ;
+static void sendValue( uint8_t type, uint8_t value, uint16_t id ) ;
 static void readSensors( void ) ;
 void wait4msIdle( void ) ;
 //void clockOut( void ) ;
@@ -297,11 +302,11 @@ static void sendCrc()
   sendByte(0xFF-Crc) ;
 }
 
-static void sendValue( uint8_t value, uint16_t id )
+static void sendValue( uint8_t type, uint8_t value, uint16_t id )
 {
 	setTX() ;
   Crc = 0;
-  sendByte(0x10); // DATA_FRAME
+  sendByte(type); // DATA_FRAME (0x10) or 0
   sendByte( (uint8_t)id );
   sendByte( id >> 8 );
   sendByte(value);
@@ -337,10 +342,23 @@ static void sendData()
 		}
 #endif	
 	}
-  sendValue( value, id ) ;
+	if ( SendStart )
+	{
+		SendStart -= 1 ;
+	  sendValue( 0x10, value, id ) ;
+	}
+	else
+	{
+	  sendValue( 0, 0, 0 ) ;
+		
+	}
 	if ( (DIDR0 & 8) == 0 )
 	{
 		whichId = 0 ;
+		if ( SendStart == 1 )
+		{
+			SendStart = 0 ;
+		}
 	}
 }
 
@@ -656,22 +674,37 @@ void main()
 			GIFR = (1 << INTF0) ;
 #endif
 				rx = recv() ;
-		    if (lastRx == 0x7e && rx == SensorId)
+
+		    if (lastRx == 0x7e )
 				{
-    		  lastRx = 0 ;
-					// Delay around 400uS
-					TCCR0B = 0 ;		// stop timer
-					TIFR0 = (1 << OCF0A) ; 		// Clear flag
-					OCR0A = TCNT0 + 60 ;
-					TCCR0B = 3 ;		// Clock div 64
-					waitCompA() ;
-  		  	sendData() ;
-  		  	readSensors() ;
+					Timer12ms += 1 ;
+					if ( Timer12ms > 16 )
+					{
+						Timer12ms = 0 ;
+						SendStart = 2 ;
+					}
+		    	if (rx == SensorId)
+					{
+						// Delay around 400uS
+						TCCR0B = 0 ;		// stop timer
+						TIFR0 = (1 << OCF0A) ; 		// Clear flag
+						OCR0A = TCNT0 + 60 ;
+						TCCR0B = 3 ;		// Clock div 64
+						waitCompA() ;
+  		  		sendData() ;
+  		  		readSensors() ;
+    			  lastRx = 0 ;
+					}
+					else
+					{
+						lastRx = rx ;
+					}
 				}
 				else
 				{
 					lastRx = rx ;
 				}
+
 #if PINCHANGE
 			}
 			GIFR = (1 << PCIF) ;		// CLEAR flag
