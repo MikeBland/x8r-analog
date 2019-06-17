@@ -78,6 +78,11 @@ FORMAT = ihex
 # Target file name (without extension).
 TARGET = Sport
 
+ifeq ($(CPU), 85)
+ FULL_PRJ = $(TARGET)85
+else
+ FULL_PRJ = $(TARGET)
+endif
 
 # Object files directory
 #     To put object files in current directory, use a dot (.), do NOT make
@@ -427,7 +432,7 @@ ALL_ASFLAGS = -mmcu=$(MCU) -I. -x assembler-with-cpp $(ASFLAGS)
 all: begin gccversion sizebefore build sizeafter end
 
 # Change the build target to build a HEX file or a library.
-build: elf hex eep lss sym bin
+build: $(FULL_PRJ).elf $(FULL_PRJ).hex $(FULL_PRJ).eep $(FULL_PRJ).lss $(FULL_PRJ).sym $(FULL_PRJ).bin
 #build: lib
 
 

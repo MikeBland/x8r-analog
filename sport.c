@@ -50,7 +50,9 @@
 //No CLKDIV8
 //int RC @ 9.6MHz, 14CK and 64mS
 
-
+#ifdef CPUT85
+#define TIFR0 TIFR
+#endif
 
 #define SENSOR_ID		0x1B
 #define A1_ID       0xF102
